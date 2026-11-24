@@ -1,0 +1,22 @@
+name: namlo
+title: Namlo
+summary: A feedback button for your app. Send bugs and requests straight to Nayo
+author: namlo
+version: 0.7.0
+icon: BubbleChatIcon
+logo: templates/logo.png
+category: feedback-testing
+
+# No settings here: the button's look is set in the Feedback tab (Namlo settings), in one place.
+
+screens:
+  - id: feedback
+    place: project-tab
+    title: Feedback
+    icon: BubbleChatIcon
+    entry: screens/feedback/index.html
+
+can:
+  send_briefs: true          # "Send to Nayo", and asking Nayo to switch the button on
+  storage: true              # keeps this project's Namlo keys on this Mac
+  reach: [namlo-api.subaz.workers.dev]      # the Namlo API, where people's feedback is stored
