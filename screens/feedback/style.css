@@ -207,3 +207,21 @@ select { height: 34px; max-width: 420px; }
 .confirm .label { display: block; margin: 12px 0 6px; }
 .confirm .actions { margin-top: 12px; }
 .primary.danger { background: var(--err); color: #fff; }
+/* Requests / Walls switch */
+.areas { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
+.area { height: 28px; padding: 0 12px; border-radius: 6px; font: 11px var(--mono); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.area:hover { color: var(--fg); }
+.area[aria-selected="true"] { background: var(--raised); color: var(--fg); }
+/* What happened before */
+.trail { list-style: none; margin: 10px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.trail li { display: grid; grid-template-columns: 84px 72px 1fr; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 13px; align-items: baseline; }
+.trail li:first-child { border-top: 0; }
+.trail .tr-when { color: var(--soft); }
+.trail .tr-msg { word-break: break-word; }
+.trail li.tr-error .tr-kind, .trail li.tr-request .tr-kind { color: var(--err); }
+.trail li.tr-wall .tr-kind, .trail li.tr-rage .tr-kind { color: var(--accent); }
+.trail li.tr-page { color: var(--muted); }
+.trail details { margin-top: 4px; }
+.trail summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+pre.code, .trail pre { margin: 6px 0 0; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+@media (max-width: 720px) { .trail li { grid-template-columns: 1fr; gap: 2px; } .areas { order: 5; } }

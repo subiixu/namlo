@@ -1,4 +1,4 @@
-/*! Namlo widget 0.7.0
+/*! Namlo widget 0.8.0
  * The Namlo feedback widget, added by the Namlo plugin for Araniko.
  * Lets people using this app report a bug, ask for a feature or share an idea,
  * and follow what happened to what they sent under "My requests".
@@ -30,6 +30,8 @@
  * The owner's settings in Araniko (synced through the Namlo API) win over these attributes.
  * From code: window.Namlo.open("bug" | "feature" | "idea"), window.Namlo.close(),
  *   window.Namlo.identify({ id, email, name }) after sign-in, window.Namlo.identify(null) after sign-out.
+ *   window.Namlo.wall("Exporting needs the Pro plan") wherever the app stops someone (an upgrade,
+ *   install or update prompt, a missing permission, a feature that isn't there yet).
  *   Or set window.NamloConfig = { user: { id, email, name } } before this script loads.
  */
 (function () {
@@ -75,11 +77,175 @@
 
   if (!/^pk_[a-f0-9]{8,}$/.test(cfg.siteKey)) {
     if (window.console) console.info('[Namlo] No site key yet, so the feedback button is hidden. Connect Namlo from its tab in Araniko.');
-    window.Namlo = { __loaded: true, open: function () {}, close: function () {}, identify: function () {} };
+    window.Namlo = { __loaded: true, open: function () {}, close: function () {}, identify: function () {}, wall: function () {} };
     return;
   }
 
-  var VERSION = '0.7.0';
+  var VERSION = '0.8.0';
+
+  // ---------- the trail: what happened before someone sends feedback ----------
+  // Kept in this browser tab only ("namlo:trail" in sessionStorage): the last 30 minutes, at most 60
+  // events. Pages visited, errors, failed requests, walls the app reports with Namlo.wall(), and
+  // repeated clicks. Never typed text, form values, request or response bodies, query strings or
+  // tokens. It leaves the browser only with a feedback message (the person can untick it), and as
+  // "walls" (errors, failed requests, blocks, repeated clicks) if the owner keeps that on.
+  var nativeFetch = window.fetch ? window.fetch.bind(window) : null;
+  var TRAIL_KEY = 'namlo:trail', TRAIL_MAX = 60, TRAIL_AGE = 30 * 60 * 1000;
+  var trail = (function () {
+    try { var t = JSON.parse(sessionStorage.getItem(TRAIL_KEY) || '[]'); return Array.isArray(t) ? t : []; } catch (e) { return []; }
+  })();
+  function scrub(text, max) {
+    return String(text === undefined || text === null ? '' : text)
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+      .replace(/\b(bearer|token|key|secret|password|pwd|auth)\b\s*[=:]?\s*[A-Za-z0-9._~+\/-]{8,}=*/gi, '$1 [hidden]')
+      .replace(/\?[^\s)'"]*/g, '')
+      .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[token]')
+      .replace(/\d{7,}/g, '[number]')
+      .replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').slice(0, max || 300);
+  }
+  // A page or request address without its query string; the route too for apps that use #/ routes.
+  function cleanUrl(u) {
+    try {
+      var x = new URL(String(u), location.href);
+      var route = /^#!?\//.test(x.hash) ? x.hash.split('?')[0] : '';
+      return scrub((x.origin === location.origin ? '' : x.origin) + x.pathname + route, 200);
+    } catch (e) { return ''; }
+  }
+  function here() { return cleanUrl(location.href); }
+  function saveTrail() { try { sessionStorage.setItem(TRAIL_KEY, JSON.stringify(trail)); } catch (e) { /* ignore */ } }
+  function remember(ev) {
+    if (!ev.m) return;
+    ev.t = Date.now();
+    var last = trail[trail.length - 1];
+    if (last && last.k === ev.k && last.m === ev.m && last.u === ev.u && ev.t - last.t < 60000) { last.n = (last.n || 1) + 1; last.t = ev.t; }
+    else trail.push(ev);
+    var cut = ev.t - TRAIL_AGE;
+    while (trail.length && (trail.length > TRAIL_MAX || trail[0].t < cut)) trail.shift();
+    saveTrail();
+    reportWall(ev);
+  }
+  function recentTrail() { var cut = Date.now() - TRAIL_AGE; return trail.filter(function (e) { return e.t >= cut; }); }
+  function fromNamlo(u) { return String(u || '').indexOf(cfg.api) === 0; }
+
+  // Errors in the page's code, and files that failed to load.
+  window.addEventListener('error', function (e) {
+    var el = e.target;
+    if (el && el !== window && el.tagName) {
+      var src = el.src || el.href;
+      if (src && !fromNamlo(src)) remember({ k: 'request', m: 'Could not load ' + el.tagName.toLowerCase() + ' ' + cleanUrl(src), u: here() });
+      return;
+    }
+    if (/namlo-widget/.test(e.filename || '')) return;
+    var stack = e.error && e.error.stack ? e.error.stack : (e.filename ? cleanUrl(e.filename) + ':' + e.lineno : '');
+    remember({ k: 'error', m: scrub(e.message || 'Script error'), u: here(), d: scrub(stack, 1000) });
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    if (r && r.name === 'AbortError') return;
+    remember({ k: 'error', m: scrub('Unhandled: ' + (r && r.message ? r.message : r)), u: here(), d: scrub(r && r.stack, 1000) });
+  });
+  // console.error, as the app logged it (kept in the trail only, not reported as a wall).
+  if (window.console && console.error) {
+    var nativeError = console.error;
+    console.error = function () {
+      try {
+        var text = Array.prototype.map.call(arguments, function (a) {
+          if (a && a.message) return a.message;
+          if (a && typeof a === 'object') { try { return JSON.stringify(a).slice(0, 200); } catch (x) { return '[object]'; } }
+          return String(a);
+        }).join(' ');
+        remember({ k: 'console', m: scrub(text), u: here() });
+      } catch (x) { /* never break the app's own logging */ }
+      return nativeError.apply(console, arguments);
+    };
+  }
+  // Requests the app made that failed or came back with an error status. Only the method, the
+  // address (no query) and the status are kept.
+  function requestWall(method, url, status, why) {
+    if (fromNamlo(url)) return;
+    var m = String(method || 'GET').toUpperCase() + ' ' + cleanUrl(url) + (status ? ' answered ' + status : ' failed' + (why ? ' (' + scrub(why, 80) + ')' : ''));
+    remember({ k: 'request', m: m, u: here(), s: status || undefined });
+  }
+  if (nativeFetch) {
+    window.fetch = function (input, init) {
+      var url = typeof input === 'string' ? input : (input && input.url) || String(input);
+      var method = (init && init.method) || (input && input.method) || 'GET';
+      var p = nativeFetch(input, init);
+      if (fromNamlo(url)) return p;
+      return p.then(function (r) { if (r.status >= 400) requestWall(method, url, r.status); return r; },
+        function (err) { if (!err || err.name !== 'AbortError') requestWall(method, url, 0, err && err.message); throw err; });
+    };
+  }
+  if (window.XMLHttpRequest) {
+    var xOpen = XMLHttpRequest.prototype.open, xSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url) { this.__namlo = { m: method, u: url }; return xOpen.apply(this, arguments); };
+    XMLHttpRequest.prototype.send = function () {
+      var x = this, info = x.__namlo;
+      if (info && !fromNamlo(info.u)) {
+        x.addEventListener('load', function () { if (x.status >= 400) requestWall(info.m, info.u, x.status); });
+        x.addEventListener('error', function () { requestWall(info.m, info.u, 0, 'network error'); });
+      }
+      return xSend.apply(this, arguments);
+    };
+  }
+  // Pages, including in-app navigation.
+  var lastPage = '';
+  function pageView() { var p = here(); if (p && p !== lastPage) { lastPage = p; remember({ k: 'page', m: p, u: p }); } }
+  ['pushState', 'replaceState'].forEach(function (f) {
+    var orig = history[f];
+    if (orig) history[f] = function () { var r = orig.apply(this, arguments); setTimeout(pageView, 0); return r; };
+  });
+  window.addEventListener('popstate', pageView);
+  window.addEventListener('hashchange', pageView);
+  // Repeated clicks on the same spot: often something that looks clickable but does nothing.
+  function describe(el) {
+    if (!el || !el.tagName) return 'the page';
+    var tag = el.tagName.toLowerCase();
+    var name = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt') ||
+      (/^(input|textarea|select)$/.test(tag) ? el.getAttribute('name') || '' : (el.textContent || ''));
+    name = scrub(name, 40);
+    return name ? tag + ' "' + name + '"' : tag;
+  }
+  var clicks = [];
+  document.addEventListener('click', function (e) {
+    if (host && e.target === host) return;
+    var now = Date.now();
+    clicks = clicks.filter(function (c) { return now - c.t < 1200 && Math.abs(c.x - e.clientX) < 30 && Math.abs(c.y - e.clientY) < 30; });
+    clicks.push({ t: now, x: e.clientX, y: e.clientY });
+    if (clicks.length === 4) remember({ k: 'rage', m: 'Clicked ' + describe(e.target) + ' again and again', u: here() });
+  }, true);
+
+  // ---------- walls, reported as they happen (when the owner keeps that on) ----------
+  var wallsOn = null, wallQueue = [], wallTimer = null;
+  var WALL_SENT_KEY = 'namlo:walls-sent';
+  var wallSent = (function () { try { return JSON.parse(sessionStorage.getItem(WALL_SENT_KEY) || '{}') || {}; } catch (e) { return {}; } })();
+  function reportWall(ev) {
+    if (ev.k === 'page' || ev.k === 'console' || wallsOn === false) return;
+    var key = ev.k + '|' + ev.m;
+    if (wallSent[key] && Date.now() - wallSent[key] < 10 * 60 * 1000) return;   // once per 10 minutes per tab
+    wallSent[key] = Date.now();
+    try { sessionStorage.setItem(WALL_SENT_KEY, JSON.stringify(wallSent)); } catch (e) { /* ignore */ }
+    wallQueue.push({ k: ev.k, m: ev.m, u: ev.u, s: ev.s, d: ev.d });
+    if (wallQueue.length > 30) wallQueue.shift();
+    if (!wallTimer) wallTimer = setTimeout(flushWalls, 4000);
+  }
+  function flushWalls() {
+    wallTimer = null;
+    if (wallsOn === false) { wallQueue = []; return; }
+    if (wallsOn !== true || !wallQueue.length || !nativeFetch) return;
+    var batch = wallQueue.splice(0, 10);
+    try {
+      nativeFetch(cfg.api + '/v1/walls', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ site_key: cfg.siteKey, reporter_id: reporterId(), v: VERSION, walls: batch }) }).catch(function () { /* ignore */ });
+    } catch (e) { /* ignore */ }
+    if (wallQueue.length) wallTimer = setTimeout(flushWalls, 4000);
+  }
+  window.addEventListener('pagehide', flushWalls);
+  // The app's own walls: "you need the Pro plan", "install the desktop app to do this", and so on.
+  function wall(message, opts) {
+    remember({ k: 'wall', m: scrub(message), u: here(), d: opts && opts.detail ? scrub(opts.detail, 1000) : undefined });
+  }
+  pageView();
   var ICONS = /* Hugeicons, MIT licence */ {"BubbleChat":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M12 21.5C17.2467 21.5 21.5 17.2467 21.5 12C21.5 6.75329 17.2467 2.5 12 2.5C6.75329 2.5 2.5 6.75329 2.5 12C2.5 13.3377 2.66372 14.5604 3.1189 15.6954C3.81756 17.4374 3.68195 18.9241 2.5 20.5C3.86146 21.1644 5.86811 21.1419 7 20.0725C8.45323 20.9748 10.1636 21.5 12 21.5Z\" stroke=\"currentColor\" stroke-linecap=\"square\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/><path d=\"M12.2 12.0002H12M7.69961 11.9999H7.49961M16.6996 11.9999H16.4996M12.4 12.0002C12.4 12.2212 12.2209 12.4002 12 12.4002C11.7791 12.4002 11.6 12.2212 11.6 12.0002C11.6 11.7793 11.7791 11.6002 12 11.6002C12.2209 11.6002 12.4 11.7793 12.4 12.0002ZM7.89961 11.9999C7.89961 12.2208 7.72052 12.3999 7.49961 12.3999C7.2787 12.3999 7.09961 12.2208 7.09961 11.9999C7.09961 11.7789 7.2787 11.5999 7.49961 11.5999C7.72052 11.5999 7.89961 11.7789 7.89961 11.9999ZM16.8996 11.9999C16.8996 12.2208 16.7205 12.3999 16.4996 12.3999C16.2787 12.3999 16.0996 12.2208 16.0996 11.9999C16.0996 11.7789 16.2787 11.5999 16.4996 11.5999C16.7205 11.5999 16.8996 11.7789 16.8996 11.9999Z\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/></svg>","Bug01":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M3.01309 4.99084C2.89323 6.05084 3.55249 8.42285 6.48923 8.42285\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/><path d=\"M17.5951 8.38081C18.8357 8.57881 21.1132 7.49881 20.9957 5.00281\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/><path d=\"M20.9928 20.9989C21.0528 19.9429 20.1777 17.5549 17.599 17.4229\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/><path d=\"M6.45163 17.4708C5.65013 17.2308 3.01306 18.3348 3.01306 20.9988\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/><path d=\"M9.3299 6.11884C9.35388 5.09884 9.84533 2.99884 12.0029 2.99884C13.9208 2.99884 14.5861 4.61884 14.676 6.11884M6.26131 9.41884C6.38118 8.63884 7.29216 6.81484 9.36586 6.63484C11.4635 6.55564 14.3403 6.58684 14.8797 6.67084C15.5869 6.73377 17.2951 7.43884 17.7506 9.41884C17.9124 10.4388 17.8285 11.8788 17.8524 12.7188C17.8165 13.5588 17.9207 15.2623 17.7565 16.1388C17.6367 17.0988 16.9894 18.4668 16.1024 19.3068C14.7838 20.7228 11.1639 22.2108 8.03534 19.4508C6.41713 17.8908 6.30925 16.3788 6.18939 15.7788C6.15725 15.4571 6.15875 13.8763 6.16541 12.3588C6.14144 11.046 6.17235 9.78063 6.26131 9.41884Z\" stroke=\"currentColor\" stroke-width=\"1.5\"/><path d=\"M3.01306 12.8988H5.9498\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/><path d=\"M20.9929 12.8988L18.1161 12.8988\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/><path d=\"M12.0033 16.4988L12.0033 20.2788\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/></svg>","Sparkles":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M15 2L15.5387 4.39157C15.9957 6.42015 17.5798 8.00431 19.6084 8.46127L22 9L19.6084 9.53873C17.5798 9.99569 15.9957 11.5798 15.5387 13.6084L15 16L14.4613 13.6084C14.0043 11.5798 12.4202 9.99569 10.3916 9.53873L8 9L10.3916 8.46127C12.4201 8.00431 14.0043 6.42015 14.4613 4.39158L15 2Z\" stroke=\"currentColor\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/><path d=\"M7 12L7.38481 13.7083C7.71121 15.1572 8.84275 16.2888 10.2917 16.6152L12 17L10.2917 17.3848C8.84275 17.7112 7.71121 18.8427 7.38481 20.2917L7 22L6.61519 20.2917C6.28879 18.8427 5.15725 17.7112 3.70827 17.3848L2 17L3.70827 16.6152C5.15725 16.2888 6.28879 15.1573 6.61519 13.7083L7 12Z\" stroke=\"currentColor\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/></svg>","Idea01":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M8 16.4998C6.7725 15.4011 6 13.7768 6 11.9998C6 8.68605 8.68629 5.99976 12 5.99976C15.3137 5.99976 18 8.68605 18 11.9998C18 13.7768 17.2275 15.4011 16 16.4998\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/><path d=\"M12 11.9998V16.4998\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/><path d=\"M9.5 18.9998H14.5\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/><path d=\"M10.5 21.4998H13.5\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/><path d=\"M3.5 11.9998H2.5M5.98438 5.97632L5.23438 5.23022M18.0195 5.97632L18.7695 5.23022M21.5 11.9998H20.5M12 2.49976V3.49976\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/></svg>","Cancel01":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M18.9991 19L5 5.00098\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/><path d=\"M19 5L5.00092 18.999\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/></svg>","ArrowLeft01":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M15 6C15 6 9.00001 10.4189 9 12C8.99999 13.5812 15 18 15 18\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/></svg>","ArrowRight01":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M9.00005 6C9.00005 6 15 10.4189 15 12C15 13.5812 9 18 9 18\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/></svg>","CheckmarkCircle02":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22C17.5228 22 22 17.5228 22 12Z\" stroke=\"currentColor\" stroke-width=\"1.5\"/><path d=\"M8 12.5L10.5 15L16 9\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/></svg>","ImageAdd01":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" fill=\"none\" aria-hidden=\"true\"><path d=\"M11.5085 2.9903C7.02567 2.9903 4.78428 2.9903 3.39164 4.38238C1.99902 5.77447 1.99902 8.015 1.99902 12.4961C1.99902 16.9771 1.99902 19.2176 3.39164 20.6098C4.78428 22.0018 7.02567 22.0018 11.5085 22.0018C15.9912 22.0018 18.2326 22.0018 19.6253 20.6098C21.0179 19.2176 21.0179 16.9771 21.0179 12.4961V11.9958\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-width=\"1.5\"/><path d=\"M4.99902 20.9898C9.209 16.2385 13.9402 9.93727 20.999 14.6632\" stroke=\"currentColor\" stroke-width=\"1.5\"/><path d=\"M17.9958 1.99829V10.0064M22.0014 5.97728L13.9902 5.99217\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"/></svg>"};
   var MARK_PATH = 'M96.3 388.9C66.8 385.5 34.5 370.1 9.6 347.7L2.0 340.8L16.1 327.2C36.5 307.6 55.0 287.1 97.2 237.5C122.8 207.3 127.3 202.0 138.6 188.5C144.6 181.3 152.2 172.3 155.5 168.4C158.8 164.6 167.3 154.5 174.5 146.0C196.8 119.6 221.8 91.3 234.4 78.2C278.8 32.1 324.0 9.8 386.2 3.1C399.4 1.6 543.1 1.6 557.6 3.1C580.6 5.4 604.5 12.0 621.0 20.6C647.3 34.4 673.0 61.7 713.1 118.0C719.1 126.4 737.9 153.8 767.5 197.2C800.7 245.8 821.7 275.5 834.1 291.3C855.8 318.9 875.7 340.5 891.5 353.8C896.5 357.9 900.9 361.7 901.4 362.1C902.4 363.0 887.7 371.7 877.3 376.3C856.3 385.5 837.9 389.4 815.0 389.4C789.6 389.5 770.2 384.8 747.9 373.4C704.0 351.0 673.0 317.4 603.7 217.5C538.2 123.2 513.1 93.8 478.1 70.5L468.0 63.8L475.3 58.2C504.5 35.6 536.1 21.5 566.3 17.6C578.5 15.9 581.4 14.9 571.8 15.6C518.7 19.4 476.3 42.8 427.2 95.3C400.3 124.1 377.0 153.4 309.2 244.5C277.6 286.9 261.8 306.9 246.4 324.0C201.6 374.0 152.1 395.4 96.3 388.9Z';
   function mark(cls) {
@@ -94,6 +260,7 @@
     { id: 'feature', label: 'Feature', hint: 'Something you need', icon: 'Sparkles', placeholder: 'What would you like to be able to do?' },
     { id: 'idea', label: 'Idea', hint: 'Anything else', icon: 'Idea01', placeholder: 'Tell us what you are thinking.' }
   ];
+  var TRAIL_WORDS = { page: 'Page', error: 'Error', console: 'Logged', request: 'Request', wall: 'Blocked', rage: 'Clicks' };
   var STATUS = {
     'new': 'Received', planned: 'Planned', in_progress: 'Being worked on', shipped: 'Done', closed: 'Closed', wont_build: 'Won\'t be built'
   };
@@ -185,6 +352,11 @@
     '.primary .ic{font-size:16px;display:inline-flex}',
     '.primary[disabled]{opacity:.35;cursor:default}',
     '.note{font-size:12px;color:var(--muted);margin-top:10px}',
+    '.linkish{background:none;border:0;padding:0;margin-top:8px;color:var(--muted);font:inherit;font-size:12px;text-decoration:underline;cursor:pointer}',
+    '.linkish:hover{color:var(--fg)}',
+    '.trail{list-style:none;margin:8px 0 0;padding:8px 10px;border:1px solid var(--line);background:var(--fill);max-height:160px;overflow:auto;font-size:12px}',
+    '.trail li{display:flex;gap:8px;padding:2px 0;color:var(--muted);word-break:break-word}',
+    '.trail .tk{flex:none;width:58px;font-family:ui-monospace,Menlo,monospace;font-size:10px;text-transform:uppercase;letter-spacing:.04em;padding-top:2px}',
     '.err{color:var(--err);font-size:13px;margin-bottom:12px}',
     /* done */
     '.done{text-align:left;padding:8px 0 4px}',
@@ -249,7 +421,7 @@
     return new Date(ts).toLocaleDateString();
   }
   function api(path, opts) {
-    return fetch(cfg.api + path, opts).then(function (r) {
+    return (nativeFetch || fetch)(cfg.api + path, opts).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
         if (!r.ok) throw new Error(data.error || 'Could not reach Namlo. Please try again.');
         return data;
@@ -274,7 +446,7 @@
   function lastUpdatesChoice() { try { return localStorage.getItem('namlo:updates') === 'yes'; } catch (e) { return false; } }
   function saveUpdatesChoice(on) { try { localStorage.setItem('namlo:updates', on ? 'yes' : 'no'); } catch (e) { /* ignore */ } }
   var state = { open: false, view: 'send', type: 'bug', message: '', email: '', notify: lastUpdatesChoice(), sending: false, error: '', items: null, loading: false, lastNumber: null, lastNotify: false,
-    images: [], screenshots: null, imgBusy: false, dragging: false };
+    images: [], screenshots: null, imgBusy: false, dragging: false, withTrail: true, showTrail: false };
   var MAX_IMAGES = 3;
 
   function isDark() {
@@ -377,6 +549,8 @@
         state.screenshots = !!d.screenshots;
         if (d.max_images) MAX_IMAGES = d.max_images;
         applyLook(d.appearance); cacheLook(d.appearance);
+        wallsOn = d.walls !== false;
+        if (wallsOn) flushWalls(); else wallQueue = [];
         render();
       })
       .catch(function () { state.screenshots = null; });
@@ -490,6 +664,22 @@
       form.appendChild(h('div', { 'class': 'field' }, [h('label', { 'for': 'namlo-email', text: 'Email for updates (optional)' }), em,
         h('div', { 'class': 'note tight', text: 'We\u2019ll email you when this changes. Nothing else.' })]));
     }
+    var recent = recentTrail();
+    if (recent.length) {
+      var tb = h('input', { type: 'checkbox', id: 'namlo-trail', onchange: function (e) { state.withTrail = e.target.checked; } });
+      tb.checked = state.withTrail;
+      var problems = recent.filter(function (e) { return e.k !== 'page'; }).length;
+      form.appendChild(h('div', { 'class': 'field' }, [
+        h('label', { 'class': 'opt', 'for': 'namlo-trail' }, [tb, h('span', { 'class': 'sw', 'aria-hidden': 'true' }),
+          h('span', {}, [h('b', { text: 'Include what happened before' }),
+            h('small', { text: recent.length + (recent.length === 1 ? ' step' : ' steps') + ' from the last 30 minutes' + (problems ? ', ' + problems + (problems === 1 ? ' problem' : ' problems') : '') + '. Never what you typed.' })])]),
+        h('button', { 'class': 'linkish', type: 'button', 'aria-expanded': state.showTrail ? 'true' : 'false',
+          onclick: function () { state.showTrail = !state.showTrail; render(); }, text: state.showTrail ? 'Hide what\u2019s included' : 'See what\u2019s included' }),
+        state.showTrail ? h('ol', { 'class': 'trail' }, recent.slice(-20).map(function (e) {
+          return h('li', {}, [h('span', { 'class': 'tk', text: TRAIL_WORDS[e.k] || e.k }), h('span', { text: e.m + (e.n > 1 ? ' (x' + e.n + ')' : '') })]);
+        })) : null
+      ]));
+    }
     form.appendChild(h('div', { 'class': 'hp', 'aria-hidden': 'true' }, [h('input', { name: 'website', tabindex: '-1', autocomplete: 'off' })]));
     var sendBtn = h('button', { 'class': 'primary', type: 'submit', disabled: state.sending || state.message.trim().length < 3 },
       [h('span', { text: state.sending ? 'Sending\u2026' : 'Send ' + type.label.toLowerCase() }), icon('ArrowRight01')]);
@@ -561,7 +751,8 @@
         notify: user ? (cfg.email && !!user.email && state.notify) : undefined,
         images: state.images.length ? state.images.map(function (u) { return { data: u.slice(u.indexOf(',') + 1) }; }) : undefined,
         page_url: location.href, user_agent: navigator.userAgent, reporter_id: reporterId(), website: hp ? hp.value : '',
-        widget_version: VERSION
+        widget_version: VERSION,
+        trail: state.withTrail ? recentTrail() : undefined
       })
     }).then(function (d) {
       state.message = ''; state.images = []; state.view = 'done'; state.items = null; state.lastNumber = d && d.number; state.lastNotify = !!(d && d.updates_by_email);
@@ -589,6 +780,6 @@
     user = cleanUser(u);
     if (wrap) render();
   }
-  window.Namlo = { __loaded: true, open: open, close: close, identify: identify };
+  window.Namlo = { __loaded: true, open: open, close: close, identify: identify, wall: wall };
   if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount);
 })();

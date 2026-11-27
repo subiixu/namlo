@@ -17,10 +17,10 @@ Namlo** in the Feedback tab, which sends you a separate short brief. Do not try 
       `public/` in Next.js, Vite, Astro, SvelteKit or Create React App, `static/` in Hugo or
       SvelteKit, or next to `index.html` in a plain site), named `namlo-widget.js`:
       ```
-      curl -fsSL 'https://namlo-api.subaz.workers.dev/v1/widget.js?v=0.7.0' -o public/namlo-widget.js
+      curl -fsSL 'https://namlo-api.subaz.workers.dev/v1/widget.js?v=0.8.0' -o public/namlo-widget.js
       ```
-      Check it before going on: its first line is `/*! Namlo widget 0.7.0`, and its SHA-256
-      (`shasum -a 256 public/namlo-widget.js`) is SHA-256 `1a8ade6c6574a8105d876b46e45b130f333f36489d5e38a4c3a84169c10e8d75`. If either doesn't match,
+      Check it before going on: its first line is `/*! Namlo widget 0.8.0`, and its SHA-256
+      (`shasum -a 256 public/namlo-widget.js`) is SHA-256 `56b4744e26e7c5c4e2da08c81b43de9d7994b320f90b38f81b871e62fb7d75ff`. If either doesn't match,
       stop and say so in your summary. Never edit the file.
    2. Load it once on every page, in the shared layout (for example `app/layout.tsx`,
       `pages/_document.tsx`, `index.html`, `src/app.html`, a base template):
@@ -52,7 +52,18 @@ Namlo** in the Feedback tab, which sends you a separate short brief. Do not try 
    6. **Log-in link for people who aren't signed in.** If the app has a log-in page, put its path
       in `data-login-url` (for example `/login`). The owner can change it later in the Feedback tab. The widget then offers "Log in" instead of an email box. No log-in
       page: leave it out, and the widget offers an optional email box.
-   7. If the app has a Content Security Policy, allow `https://namlo-api.subaz.workers.dev` in `connect-src`.
+   7. **Walls: where the app stops people.** Find the places where the app tells someone they can't
+   do something, and add `window.Namlo && window.Namlo.wall('<the message they see>')` right where
+   it's shown, so Namlo counts it and attaches it to their feedback. Look for:
+   - upgrade or paywall prompts ("Exporting needs the Pro plan");
+   - "install", "update" or "use the desktop/mobile app to do this" messages;
+   - permission or access-denied screens, and features switched off by a flag or a setting;
+   - "not available on this device, browser, plan or region";
+   - forms the app refuses with a message (not every validation error; the ones that block the task).
+   Use the words the person sees, plus the plan, feature or setting name if that helps. Never put
+   their name, email, ids or anything they typed in it. Errors, failed requests and repeated clicks
+   are recorded by the widget itself; don't add calls for those.
+   8. If the app has a Content Security Policy, allow `https://namlo-api.subaz.workers.dev` in `connect-src`.
 
 3. **Mobile or desktop apps with no web page** (Swift, Kotlin, Flutter, React Native, Electron
    without a web layout you control): do not copy the widget. Instead add a simple "Send feedback"
@@ -60,7 +71,9 @@ Namlo** in the Feedback tab, which sends you a separate short brief. Do not try 
    (`curl -fsSL 'https://namlo-api.subaz.workers.dev/v1/docs/api.md'`), reachable from the
    app's settings or help screen. Keep the site key in one constant, empty for now. If the app has
    accounts, send the signed-in person and an "Email me updates" switch as those notes say,
-   instead of an email box.
+   instead of an email box. Keep a short list of the last few problems the app hit (errors, failed
+   requests, the app's own "you can't do this" messages) and send it as `trail`, and report them to
+   `/v1/walls`, both as the notes describe.
 
 4. **No user-facing app** (a library, a CLI, an API with no UI): change nothing in the code. Write
    only the record file in step 5 and say in your summary that Namlo needs an app with a screen.
@@ -69,6 +82,7 @@ Namlo** in the Feedback tab, which sends you a separate short brief. Do not try 
    - every file you added or changed, and what you changed in it;
    - the exact place where the site key goes (file and variable or attribute name);
    - where you call `Namlo.identify` (or set the `data-user-*` attributes), if you did;
+   - every place you call `Namlo.wall`, with its message;
    - the line: `Site key: not set yet`.
 
 Done when the app still builds, the widget file is in place and loaded from the shared layout (or

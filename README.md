@@ -26,6 +26,11 @@ repeats, and press **Send to Nayo** to have it fixed or built.
   work is merged it uses it, so the request turns Shipped, the person gets a "this is fixed/built"
   note, and Nayo says "Namlo #N is shipped" in its summary, which Araniko sees too.
 - **Reply:** a short note the person sees next to their request.
+- **What happened before:** each request can carry the last 30 minutes of what the person hit in
+  the app (pages, errors, failed requests, blocks, repeated clicks), shown before they send it and
+  passed to Nayo. Never what they typed.
+- **Walls:** the same problems, counted across everyone even when nobody writes in, under **Walls**
+  in the tab. Send one to Nayo; it marks it fixed when its work is merged. Switch off in Namlo settings.
 - **Merge** repeats, so you see how many people asked and they all follow one status.
 
 ## Screenshots

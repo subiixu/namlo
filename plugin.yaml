@@ -2,7 +2,7 @@ name: namlo
 title: Namlo
 summary: A feedback button for your app. Send bugs and requests straight to Nayo
 author: namlo
-version: 0.7.0
+version: 0.8.0
 icon: BubbleChatIcon
 logo: templates/logo.png
 category: feedback-testing
